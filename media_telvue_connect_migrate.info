@@ -1,0 +1,6 @@
+name = Media Telvue Connect Migrate
+description = Migrates Cloudcast Media and File Data to Telvue Connect
+package = CM Bootstrap
+core = 7.x
+configure = admin/media-telvue-connect-migrate/configure
+dependencies[] = media_telvue_connect

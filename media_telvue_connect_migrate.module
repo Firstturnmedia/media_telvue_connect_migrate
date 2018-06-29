@@ -1,0 +1,274 @@
+<?php
+
+// @todo Replace these w/ values from variables table
+define('CLOUDCAST_ID', variable_get('cloudcast_id', FALSE));
+define('CONNECT_ID', variable_get('connect_id', FALSE));
+
+/**
+ * Implements hook_permission().
+ */
+function media_telvue_connect_migrate_permission() {
+  return array(
+    'administer media telvue connect migrate' => array(
+    'title' => t('Administer Media Telvue Connect Migrate'),
+    'description' => t('Provides access to run Media Telvue Connect Migrate')
+  ));
+}
+
+/**
+ * Implements hook_menu().
+ */
+function media_telvue_connect_migrate_menu() {
+  $items = array();
+
+  $items['admin/media-telvue-connect-migrate'] = array(
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('media_telvue_connect_migrate_form'),
+    'access arguments' => array('administer media telvue connect migrate'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  // XML import route
+  $items['admin/media-telvue-connect-migrate/import'] = array(
+    'title' => 'Media Telvue Connect Migrate Import',
+    'description' => 'Media Telvue Connect Migrate Import',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('media_telvue_connect_migrate_import_form'),
+    'access arguments' => array('administer media telvue connect migrate'),
+    'file' => 'form/media_telvue_connect_migrate_import.form.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // Configure page for setting Cloudcast and Connect IDs
+  $items['admin/media-telvue-connect-migrate/configure'] = array(
+    'title' => 'Media Telvue Connect Migrate Import',
+    'description' => 'Settings for Media Telvue Connect Migrate Import',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('media_telvue_connect_migrate_settings_form'),
+    'access arguments' => array('administer media telvue connect migrate'),
+    'file' => 'media_telvue_connect_migrate.admin.inc',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+  );
+
+  return $items;
+}
+
+/**
+ * Helper function to get query data from file_managed table
+ */
+function media_telvue_connect_migrate_query($current_fid = NULL, $limit = NULL) {
+  // Get needles to replace
+  $image_uri_needle = 'media-cloudcast';
+  $video_uri_needle = CLOUDCAST_ID;
+
+  // Query the file_managed table
+  $query = db_select('file_managed', 'fm')->fields('fm');
+
+  // Add OR conditions
+  $db_or = db_or();
+  $db_or->condition('uri', '%' . db_like($image_uri_needle) . '%', 'LIKE');
+  $db_or->condition('uri', '%' . db_like($video_uri_needle) . '%', 'LIKE');
+  $query->condition($db_or);
+
+  // Greater than current fid, for batch.
+  if (isset($current_fid)) {
+    $query->condition('fid', $current_fid, '>');
+  }
+
+  // Limit, for batch
+  if (isset($limit)) {
+    $query->range(0, $limit);
+  }
+
+  // Execute the query
+  $result = $query->execute()->fetchAll();
+
+  return $result;
+}
+
+/**
+ * Helper function to get connect video id from cloudcast id
+ */
+function media_telvue_connect_migrate_get_connect_video_id($cloudcast_video_id) {
+  $connect_video_id = db_query('SELECT connect_video_id FROM {media_telvue_connect_migrate_legacy} WHERE cloudcast_video_id = :cloudcast_video_id',
+    array(
+      ':cloudcast_video_id' => $cloudcast_video_id
+    ))->fetchField();
+
+  //
+  if (!empty($connect_video_id)) {
+   return $connect_video_id;
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Form.
+ */
+function media_telvue_connect_migrate_form($form, &$form_state) {
+  $form['media_telvue_connect_migrate_message'] = array (
+		'#type' => 'item',
+		'#markup' => 'Clicking this button will migrate your Show media data from Cloudcast to Telvue Connect.',
+	);
+
+  $form['media_telvue_connect_migrate'] = array(
+    '#type' => 'submit',
+    '#value' => t('Run Telvue Connect Migration'),
+  );
+
+  return $form;
+}
+
+/**
+ * Form validate
+ */
+function media_telvue_connect_migrate_form_validate($form, &$form_state) {
+  // Check that cloudcast and connect IDs have been set.
+  if (!CLOUDCAST_ID || !CONNECT_ID) {
+    form_set_error('media_telvue_connect_migrate', t('Please add cloudcast and connect IDs!'));
+  }
+}
+
+/**
+ * Form Submit.
+ */
+function media_telvue_connect_migrate_form_submit($form, &$form_state) {
+  // Get max count
+  $max_count = count(media_telvue_connect_migrate_query());
+
+  if ($max_count > 0) {
+    $form_values = array(
+  	  'max' => $max_count,
+    );
+
+    $operations[] = array('media_telvue_connect_migrate_batch_op', array($form_values));
+
+    $batch = array(
+      'operations' => $operations,
+      'finished' => 'media_telvue_connect_migrate_batch_finished',
+      'title' => t("Media Telvue Connect Migrate"),
+      'init_message' => t('Migrating media data from Cloudcast to Telvue Connect'),
+      'error_message' => t('Error!'),
+    );
+
+    batch_set($batch);
+  }
+  else {
+    drupal_set_message(t('No data to process.'));
+  }
+}
+
+/**
+ * Batch operation
+ */
+function media_telvue_connect_migrate_batch_op($form_values, &$context) {
+  // Set initial batch $context values
+  if (empty($context['sandbox'])) {
+    $context['sandbox']['progress'] = 0;
+    $context['sandbox']['current_fid'] = 0;
+    $context['sandbox']['max'] = $form_values['max'];
+  }
+
+  if ($context['sandbox']['progress'] != $context['sandbox']['max']) {
+    // Get data to process
+    $data = media_telvue_connect_migrate_query($current_fid = $context['sandbox']['current_fid'], $limit = 10);
+
+    foreach ($data as $item) {
+      // Detect video
+      if ($item->filemime == 'video/cloudcast') {
+        // ex: cloudcast://id/T01193/video/272531
+        // Searches and replacements arrays
+        $searches = array('cloudcast', CLOUDCAST_ID);
+        $replacements = array('connect', CONNECT_ID);
+
+        // Get the cloudcast video id
+        // @todo dont use the filename. it's not always the cloudcast id.
+        // Don't hardcode the connect id, get from constant var
+        $cloudcast_replace_string = 'cloudcast://id/'. CLOUDCAST_ID . '/video/';
+        $cloudcast_video_id = str_replace($cloudcast_replace_string, '', $item->uri);
+
+        // Get connect video id
+        $connect_video_id = media_telvue_connect_migrate_get_connect_video_id($cloudcast_video_id);
+
+        // Need to account for videos that arent in the map table?
+        if ($connect_video_id) {
+          // Generate a new uri w/ the replacements
+          //$new_uri = str_replace($searches, $replacements, $item->uri);
+          $new_uri = 'connect://id/'. CONNECT_ID . '/video/' . $connect_video_id;
+
+          // Set the new uri
+          $item->uri = $new_uri;
+
+          // Set new filename>
+          $item->filename = $connect_video_id;
+
+          // Set new filemime for connect
+          $item->filemime = 'video/connect';
+
+          // Update the DB file_managed row
+          db_update('file_managed')
+            ->fields(array(
+              'uri' => $item->uri,
+              'filename' => $item->filename,
+              'filemime' => $item->filemime
+            ))
+            ->condition('fid', $item->fid, '=')
+            ->execute();
+        }
+      }
+      // Else, image
+      else {
+        // ex: public://media-cloudcast/272531.jpg
+        // Replacement
+        $new_uri = str_replace('media-cloudcast', 'media-telvue-connect', $item->uri);
+
+        // Set new uri
+        $item->uri = $new_uri;
+
+        // Update the DB file_managed row
+        db_update('file_managed')
+          ->fields(array('uri' => $item->uri))
+          ->condition('fid', $item->fid, '=')
+          ->execute();
+      }
+
+      // Update batch $context values
+      $context['results'][] = $item->fid . ' : ' . check_plain($item->fid);
+      $context['sandbox']['progress']++;
+      $context['sandbox']['current_fid'] = $item->fid;
+      $context['message'] = 'Processed ' . $context['sandbox']['progress'] . ' of ' . $context['sandbox']['max'] . ' file entities.';
+    }
+  }
+  // @todo why have both of these? the Else and the final If?
+  else {
+    $context['finished'] = $context['sandbox']['progress'] / $context['sandbox']['max'];
+  }
+
+  if ($context['sandbox']['progress'] != $context['sandbox']['max']) {
+    $context['finished'] = $context['sandbox']['progress'] / $context['sandbox']['max'];
+  }
+}
+
+/**
+ * Batch 'finished' callback
+ */
+function media_telvue_connect_migrate_batch_finished($success, $results, $operations) {
+  if ($success) {
+    drupal_set_message(t('Media Telvue Connect Migration is Complete!'));
+  }
+  else {
+    // An error occurred.
+    // $operations contains the operations that remained unprocessed.
+    $error_operation = reset($operations);
+    drupal_set_message(
+      t('An error occurred while processing @operation with arguments : @args',
+        array(
+          '@operation' => $error_operation[0],
+          '@args' => print_r($error_operation[0], TRUE),
+        )
+      )
+    );
+  }
+}

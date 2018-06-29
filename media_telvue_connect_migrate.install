@@ -1,0 +1,36 @@
+<?php
+
+/**
+ * Implements hook_schema().
+ */
+function media_telvue_connect_migrate_schema() {
+  $schema['media_telvue_connect_migrate_legacy'] = array(
+    'description' => 'Stores Cloudcast and Connect ID maps.',
+    'fields' => array(
+      'cloudcast_video_id' => array(
+        'description' => 'Cloudcast video id',
+        'type' => 'varchar',
+        'length' => 128,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'connect_video_id' => array(
+        'description' => 'Connect video id',
+        'type' => 'varchar',
+        'length' => 128,
+        'unsigned' => FALSE,
+        'not null' => TRUE
+      ),
+    ),
+    'primary key' => array('cloudcast_video_id'),
+  );
+
+  return $schema;
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function media_telvue_connect_migrate_uninstall() {
+  drupal_uninstall_schema('media_telvue_connect_migrate_legacy');
+}
